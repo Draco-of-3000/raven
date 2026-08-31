@@ -67,6 +67,11 @@ cryptography. There are no third-party crypto dependencies to audit or trust.
 
 ## Install
 
+Download the latest build from the
+[releases page](https://github.com/Draco-of-3000/raven/releases/latest). Take the
+`.dmg` for macOS or the `.exe` for Windows. The Mac build is universal and runs on
+both Intel and Apple Silicon.
+
 Both builds are unsigned, because a code-signing certificate costs money I have not
 spent on a side project. That means the operating system will warn you once on first
 launch. This is expected and the steps below get past it.
