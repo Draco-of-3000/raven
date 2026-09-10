@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"raven/internal/transfer"
+	"github.com/Draco-of-3000/raven/transfer"
 )
 
 func main() {

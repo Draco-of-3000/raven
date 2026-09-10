@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"raven/internal/transfer"
+	"github.com/Draco-of-3000/raven/transfer"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )

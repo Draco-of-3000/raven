@@ -1,4 +1,4 @@
-module raven
+module github.com/Draco-of-3000/raven
 
 go 1.23.0
 
