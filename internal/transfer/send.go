@@ -31,6 +31,18 @@ type sendItem struct {
 	meta fileMeta
 }
 
+// SendFile is one file to send whose bytes come from a caller-supplied source
+// rather than a filesystem path. Open is called once, when the file's turn
+// comes, and the reader it returns must yield exactly Size bytes. Rel is the
+// optional folder-relative path (forward-slash separated, rooted at the folder
+// name) and is empty for a loose file.
+type SendFile struct {
+	Name string
+	Rel  string
+	Size int64
+	Open func() (io.ReadCloser, error)
+}
+
 // dialTLS dials target, completes a mutual-TLS 1.3 handshake, and runs verify
 // against the server's pinned fingerprint. Returns the TLS conn and the peer's
 // fingerprint. The caller closes the conn.
@@ -50,12 +62,46 @@ func dialTLS(ctx context.Context, target string, id *Identity, verify VerifyFunc
 	return tc, cap.fp, nil
 }
 
-// SendV3 streams files to a PAIRED target over mutual TLS, after the receiver
-// accepts. The target must already be paired (its fingerprint known in `paired`);
-// an unknown or changed identity aborts the handshake.
+// SendV3 streams files at the given paths to a PAIRED target. It expands folders
+// and then hands the result to SendFiles, which is the source-agnostic core.
 func SendV3(ctx context.Context, target string, paths []string, id *Identity, paired *PairedStore, obs Observer, dialTimeout time.Duration) error {
+	items, err := expand(paths)
+	if err != nil {
+		return err
+	}
+	files := make([]SendFile, len(items))
+	for i, it := range items {
+		p := it.path
+		files[i] = SendFile{
+			Name: it.meta.Name, Rel: it.meta.Rel, Size: it.meta.Size,
+			Open: func() (io.ReadCloser, error) { return os.Open(p) },
+		}
+	}
+	return SendFiles(ctx, target, files, id, paired, obs, dialTimeout)
+}
+
+// SendFiles streams files to a PAIRED target over mutual TLS, after the receiver
+// accepts. It is the source-agnostic core of SendV3: the desktop and CLI feed it
+// paths through expand; Android feeds it file descriptors. The target must
+// already be paired (its fingerprint known in `paired`); an unknown or changed
+// identity aborts the handshake.
+func SendFiles(ctx context.Context, target string, files []SendFile, id *Identity, paired *PairedStore, obs Observer, dialTimeout time.Duration) error {
 	if obs == nil {
 		obs = NopObserver{}
+	}
+	if len(files) == 0 {
+		return errors.New("nothing to send")
+	}
+	for _, f := range files {
+		if strings.TrimSpace(f.Name) == "" {
+			return errors.New("file without a name")
+		}
+		if f.Open == nil {
+			return fmt.Errorf("no source for %q", f.Name)
+		}
+		if f.Size < 0 {
+			return fmt.Errorf("negative size for %q", f.Name)
+		}
 	}
 	// Derive a cancelable context so the UI can stop this send mid-flight.
 	ctx, cancel := context.WithCancel(ctx)
@@ -63,10 +109,6 @@ func SendV3(ctx context.Context, target string, paths []string, id *Identity, pa
 	if c, ok := obs.(Canceler); ok {
 		c.SetCancel(cancel)
 		defer c.SetCancel(nil)
-	}
-	items, err := expand(paths)
-	if err != nil {
-		return err
 	}
 	// Verify: the server's fingerprint must be one we have paired with.
 	verify := func(fp string) error {
@@ -100,11 +142,13 @@ func SendV3(ctx context.Context, target string, paths []string, id *Identity, pa
 	if _, err := tc.Write([]byte{intentTransfer}); err != nil {
 		return err
 	}
-	if err := writeUint32(tc, uint32(len(items))); err != nil {
+	if err := writeUint32(tc, uint32(len(files))); err != nil {
 		return err
 	}
-	for _, it := range items {
-		if err := writeMetaFrame(tc, it.meta); err != nil {
+	metas := make([]fileMeta, len(files))
+	for i, f := range files {
+		metas[i] = fileMeta{Name: f.Name, Size: f.Size, Rel: f.Rel}
+		if err := writeMetaFrame(tc, metas[i]); err != nil {
 			return err
 		}
 	}
@@ -123,14 +167,14 @@ func SendV3(ctx context.Context, target string, paths []string, id *Identity, pa
 	}
 
 	var totalBytes int64
-	for _, it := range items {
-		totalBytes += it.meta.Size
+	for _, f := range files {
+		totalBytes += f.Size
 	}
-	obs.SessionStart(Sending, peerLabel, len(items), totalBytes)
-	for i, it := range items {
-		if err := sendBody(tc, it.path, it.meta, i+1, len(items), obs); err != nil {
+	obs.SessionStart(Sending, peerLabel, len(files), totalBytes)
+	for i, f := range files {
+		if err := sendBody(tc, f, metas[i], i+1, len(files), obs); err != nil {
 			obs.SessionEnd(Sending, peerLabel, err)
-			return fmt.Errorf("failed sending %q: %w", it.path, err)
+			return fmt.Errorf("failed sending %q: %w", displayName(metas[i]), err)
 		}
 	}
 	obs.SessionEnd(Sending, peerLabel, nil)
@@ -239,18 +283,18 @@ func writeMetaFrame(conn net.Conn, meta fileMeta) error {
 	return err
 }
 
-func sendBody(conn net.Conn, path string, meta fileMeta, idx, total int, obs Observer) error {
-	f, err := os.Open(path)
+func sendBody(conn net.Conn, file SendFile, meta fileMeta, idx, total int, obs Observer) error {
+	src0, err := file.Open()
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer src0.Close()
 
 	label := displayName(meta)
 	obs.FileStart(Sending, idx, total, label, meta.Size)
 	hasher := sha256.New()
 	pw := &progressWriter{obs: obs, dir: Sending, index: idx, total: total, name: label, size: meta.Size}
-	src := io.TeeReader(f, io.MultiWriter(hasher, pw))
+	src := io.TeeReader(src0, io.MultiWriter(hasher, pw))
 	if _, err := io.CopyN(conn, src, meta.Size); err != nil {
 		obs.FileDone(FileResult{Dir: Sending, Index: idx, Total: total, Name: label, Size: meta.Size, Err: err})
 		return fmt.Errorf("send body: %w", err)
