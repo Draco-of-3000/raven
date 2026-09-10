@@ -323,6 +323,9 @@ func (r *Receiver) handleTransfer(tc *tls.Conn, peerAddr, peerFP string) {
 		}
 		metas = append(metas, m)
 	}
+	// Clear the manifest's read deadline before waiting on the person to accept. Left in place, it
+	// expires while they decide, and the body read that follows fails with "i/o timeout".
+	_ = tc.SetReadDeadline(time.Time{})
 
 	// Authorization: unpaired peers cannot transfer. Then the accept gate.
 	accepted := isPaired
