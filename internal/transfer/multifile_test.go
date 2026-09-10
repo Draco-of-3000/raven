@@ -65,6 +65,16 @@ func TestMultiFileBatchAllArrive(t *testing.T) {
 	_ = senderStore.Add(PairedDevice{Name: "Receiver", Fingerprint: recvr.FP})
 	_ = recvStore.Add(PairedDevice{Name: "Sender", Fingerprint: sender.FP})
 
+	// Shrink the control-read/write timeout so the batch's wall-clock easily
+	// exceeds it. With the old bug (one stale handshake-time deadline applied to
+	// writes), the per-file ack would fail once this elapsed and the batch would
+	// break partway. With per-op deadlines + the body unbounded, all files arrive.
+	// Set before the receiver starts and restored after it has stopped, so its
+	// goroutines never read the variable while it is being written.
+	old := idleTimeout
+	idleTimeout = 150 * time.Millisecond
+	defer func() { idleTimeout = old }()
+
 	// Bind an OS-assigned free port. Port 0 on the Receiver means "the default
 	// 51888", which would collide with a running Raven, so pick a real free port.
 	port := freePort(t)
@@ -76,17 +86,9 @@ func TestMultiFileBatchAllArrive(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go rcv.Serve(ctx)
-	defer rcv.Close()
-
-	// Shrink the control-read/write timeout so the batch's wall-clock easily
-	// exceeds it. With the old bug (one stale handshake-time deadline applied to
-	// writes), the per-file ack would fail once this elapsed and the batch would
-	// break partway. With per-op deadlines + the body unbounded, all files arrive.
-	old := idleTimeout
-	idleTimeout = 150 * time.Millisecond
-	defer func() { idleTimeout = old }()
+	done := make(chan struct{})
+	go func() { _ = rcv.Serve(ctx); close(done) }()
+	defer func() { cancel(); _ = rcv.Close(); <-done }()
 
 	target := fmt.Sprintf("127.0.0.1:%d", port)
 	if err := SendV3(context.Background(), target, paths, sender, senderStore, NopObserver{}, 10*time.Second); err != nil {
