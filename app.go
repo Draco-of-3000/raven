@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -105,11 +106,11 @@ func (a *App) startReceiver() {
 	a.mu.Unlock()
 
 	a.recv = &transfer.Receiver{
-		Dir:        cfg.SaveDir,
-		Name:       cfg.DeviceName,
-		Port:       cfg.Port,
-		Concurrent: true,
-		Accept:     a.confirmAccept,
+		Dir:          cfg.SaveDir,
+		Name:         cfg.DeviceName,
+		Port:         cfg.Port,
+		Concurrent:   true,
+		Accept:       a.confirmAccept,
 		Identity:     a.identity,
 		Paired:       a.paired,
 		OnPair:       a.confirmPairing,
@@ -210,12 +211,27 @@ func (a *App) ListReceivers() ([]transfer.ReceiverInfo, error) {
 // typed "pair first" error if the target is not yet paired.
 func (a *App) SendFiles(target string, paths []string) error {
 	obs := a.newObserver("tx", target)
-	err := transfer.SendV3(a.ctx, target, paths, a.identity, a.paired, obs, 15*time.Second)
+	err := sendAndReport(a.ctx, obs, target, paths, a.identity, a.paired, 15*time.Second)
 	switch {
+	case errors.Is(err, context.Canceled):
+		return nil // the person cancelled it themselves; there is nothing to report back
 	case err == transfer.ErrDeclined:
 		return fmt.Errorf("the other device declined the transfer")
 	case err == transfer.ErrNotPaired:
 		return fmt.Errorf("not paired with this device, pair first")
+	}
+	return err
+}
+
+/*
+sendAndReport sends, and makes sure the sender's UI hears that the session is over either way. The core
+reports the end of a session it started, but a send can fail before that: a decline, an unpaired device, a
+machine that never answers. Without this the sending window sat on "waiting for them to accept" forever.
+*/
+func sendAndReport(ctx context.Context, obs transfer.Observer, target string, paths []string, id *transfer.Identity, paired *transfer.PairedStore, dial time.Duration) error {
+	err := transfer.SendV3(ctx, target, paths, id, paired, obs, dial)
+	if err != nil {
+		obs.SessionEnd(transfer.Sending, target, err)
 	}
 	return err
 }
@@ -508,12 +524,12 @@ func (a *App) SetAutoAcceptPaired(on bool) error {
 }
 
 func (a *App) newObserver(prefix, peer string) transfer.Observer {
-	return &wailsObserver{
+	return &onceObserver{Observer: &wailsObserver{
 		app:  a,
 		ctx:  a.ctx,
 		id:   fmt.Sprintf("%s-%d", prefix, atomic.AddInt64(&a.counter, 1)),
 		peer: peer,
-	}
+	}}
 }
 
 // CancelTransfer stops an in-flight transfer (send or receive) by its id.
@@ -533,6 +549,28 @@ type wailsObserver struct {
 	ctx  context.Context
 	id   string
 	peer string
+}
+
+/*
+onceObserver passes everything through but reports the end of a session at most once, whether the core gets
+there first or the send path does. It forwards cancel registration too, since the core looks for that on the
+observer it was handed and a transfer must stay cancellable.
+*/
+type onceObserver struct {
+	transfer.Observer
+	ended atomic.Bool
+}
+
+func (o *onceObserver) SessionEnd(dir transfer.Direction, peer string, err error) {
+	if o.ended.CompareAndSwap(false, true) {
+		o.Observer.SessionEnd(dir, peer, err)
+	}
+}
+
+func (o *onceObserver) SetCancel(cancel func()) {
+	if c, ok := o.Observer.(transfer.Canceler); ok {
+		c.SetCancel(cancel)
+	}
 }
 
 func (o *wailsObserver) emit(name string, data map[string]interface{}) {

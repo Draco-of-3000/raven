@@ -195,10 +195,8 @@ export default function App() {
             if (failed.length) pushToast(`${failed.length} item${failed.length > 1 ? 's' : ''} failed`)
           }
         }
-        // A cancel surfaces as a context-canceled / closed-conn error; the user
-        // already knows they cancelled, so don't show a scary failure toast.
-        const cancelled = /context canceled|use of closed|canceled|EOF/i.test(d.error || '')
-        if (d.error && d.dir === 'send' && !cancelled) pushToast(`Send failed: ${d.error}`)
+        // Nothing to say here about a failed send: SendFiles rejects with the reason, and the caller
+        // already turns that into a message the person can act on, such as offering to pair first.
       }),
     ]
 
