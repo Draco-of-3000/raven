@@ -173,6 +173,11 @@ func SendFiles(ctx context.Context, target string, files []SendFile, id *Identit
 	obs.SessionStart(Sending, peerLabel, len(files), totalBytes)
 	for i, f := range files {
 		if err := sendBody(tc, f, metas[i], i+1, len(files), obs); err != nil {
+			// A cancel closes the conn to unblock the write, so err is only its symptom. Report the
+			// cancellation itself, as the wait for accept above does, so the UI can tell it from a failure.
+			if ctx.Err() != nil {
+				err = ctx.Err()
+			}
 			obs.SessionEnd(Sending, peerLabel, err)
 			return fmt.Errorf("failed sending %q: %w", displayName(metas[i]), err)
 		}

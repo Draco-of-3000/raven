@@ -363,6 +363,9 @@ func (r *Receiver) handleTransfer(tc *tls.Conn, peerAddr, peerFP string) {
 		// comes from the user's Cancel (closeOnCancel) and TCP itself; the small
 		// framed reads/writes (meta, checksum, ack) keep their per-op deadlines.
 		if err := r.receiveBody(tc, m, i+1, len(metas), obs, sink); err != nil {
+			if sctx.Err() != nil {
+				err = sctx.Err() // cancelled: the closed conn's read error is only the symptom
+			}
 			obs.SessionEnd(Receiving, peerLabel, err)
 			return
 		}
