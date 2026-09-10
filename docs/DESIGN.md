@@ -160,6 +160,11 @@ thin command line binary and the Wails GUI. The GUI reports progress and lifecyc
 and uses native file drop. A detailed implementation plan (module structure, Wails wiring,
 and toolchain setup of Go and the Wails CLI via Homebrew) is the next deliverable.
 
+The transfer core is source-agnostic: `SendFiles` takes files from caller-supplied readers and
+the receiver writes through a `FileSink`, with the path-based send and directory receive as
+thin wrappers over them. The core lives in `transfer/` so other builds can link the same
+protocol rather than reimplement it.
+
 ## 10. Open items
 
 - Final raven Lottie selection and its license (placeholder in mockups now).

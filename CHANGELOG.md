@@ -5,7 +5,15 @@ downloadable build.
 
 ## Unreleased
 
-Nothing pending.
+Fixed a bug where accepting a transfer more than a minute after it was offered made it fail
+once the files started to arrive. The receiver set a timeout while reading the list of incoming
+files and never cleared it, so if you took longer than that to decide, the first read of file
+data failed and the sender saw the connection reset after sending everything. The timeout is
+now cleared before the prompt is shown. A regression test holds the prompt open past the
+timeout and fails without the fix.
+
+Cancelling a transfer now reports itself as a cancellation rather than as the error that
+closing the connection causes, so an app can tell a person's own cancel from a failure.
 
 ## 2026-06-14
 
