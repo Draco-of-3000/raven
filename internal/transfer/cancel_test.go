@@ -21,7 +21,7 @@ func TestReceiveBodyCleansPartialOnDrop(t *testing.T) {
 	cw := &shortConn{data: make([]byte, 1024)} // far fewer than the declared size
 	meta := fileMeta{Name: "partial.bin", Size: 1 << 20}
 
-	err := r.receiveBody(cw, meta, 1, 1, NopObserver{}, pr)
+	err := r.receiveBody(cw, meta, 1, 1, NopObserver{}, &dirSink{pr: pr})
 	if err == nil {
 		t.Fatal("expected an error when the connection drops mid-file")
 	}

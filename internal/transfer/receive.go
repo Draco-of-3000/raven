@@ -20,6 +20,27 @@ import (
 // peer (already authenticated as paired) and the file manifest. nil = auto-accept.
 type AcceptFunc func(peerFP, peerName string, files []IncomingFile) bool
 
+// FileSink decides where received files land. The core asks it to Create a
+// target for each incoming file, streams the body into it, then calls Commit on
+// a verified file or Discard on one that failed or was cancelled. One sink
+// serves one session, so it can keep per-session state such as a renamed
+// folder root. Names and paths handed to Create are already sanitized.
+type FileSink interface {
+	Create(name, rel string, size int64) (FileTarget, error)
+}
+
+// FileTarget is one file being written through a FileSink.
+type FileTarget interface {
+	io.Writer
+	// Label is what progress and results call this file: the folder-relative
+	// path for a file inside a folder, otherwise the file name.
+	Label() string
+	// Commit finalizes a verified file and returns where it was saved.
+	Commit() (string, error)
+	// Discard removes a partial or corrupt file.
+	Discard() error
+}
+
 // Receiver listens for incoming transfers and reports them through an Observer.
 // All connections are mutual-TLS; a peer must be paired before it can transfer.
 type Receiver struct {
@@ -30,6 +51,7 @@ type Receiver struct {
 	NewObs     func(peer string) Observer // per-session observer factory (preferred for the GUI)
 	Concurrent bool                       // handle sessions concurrently (GUI) vs sequentially (CLI)
 	Accept     AcceptFunc                 // transfer gate (nil = auto-accept)
+	NewSink    func(peer string) FileSink // per-session file destination (nil = save under Dir)
 
 	Identity     *Identity                       // this device's TLS identity (required)
 	Paired       *PairedStore                    // known/trusted peers (required)
@@ -56,8 +78,10 @@ func (r *Receiver) Listen() error {
 	if r.Dir == "" {
 		r.Dir = "."
 	}
-	if err := os.MkdirAll(r.Dir, 0o755); err != nil {
-		return fmt.Errorf("cannot create save directory: %w", err)
+	if r.NewSink == nil {
+		if err := os.MkdirAll(r.Dir, 0o755); err != nil {
+			return fmt.Errorf("cannot create save directory: %w", err)
+		}
 	}
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", r.Port))
 	if err != nil {
@@ -140,6 +164,52 @@ func (r *Receiver) obsFor(peer string) Observer {
 		return r.Obs
 	}
 	return NopObserver{}
+}
+
+func (r *Receiver) sinkFor(peer string) FileSink {
+	if r.NewSink != nil {
+		if s := r.NewSink(peer); s != nil {
+			return s
+		}
+	}
+	return &dirSink{pr: newPathResolver(r.Dir)}
+}
+
+// dirSink is the default FileSink: files land under a directory, with folder
+// structure rebuilt from Rel and collisions renamed (see pathResolver).
+type dirSink struct{ pr *pathResolver }
+
+func (s *dirSink) Create(name, rel string, size int64) (FileTarget, error) {
+	outPath, label, err := s.pr.resolve(fileMeta{Name: name, Rel: rel, Size: size})
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+		return nil, fmt.Errorf("create folder for %s: %w", label, err)
+	}
+	f, err := os.Create(outPath)
+	if err != nil {
+		return nil, fmt.Errorf("create %s: %w", outPath, err)
+	}
+	return &fileTarget{f: f, path: outPath, label: label}, nil
+}
+
+type fileTarget struct {
+	f           *os.File
+	path, label string
+}
+
+func (t *fileTarget) Write(p []byte) (int, error) { return t.f.Write(p) }
+func (t *fileTarget) Label() string               { return t.label }
+func (t *fileTarget) Commit() (string, error) {
+	if err := t.f.Close(); err != nil {
+		return "", err
+	}
+	return t.path, nil
+}
+func (t *fileTarget) Discard() error {
+	_ = t.f.Close()
+	return os.Remove(t.path)
 }
 
 func (r *Receiver) handleIncoming(rawConn net.Conn) {
@@ -283,13 +353,13 @@ func (r *Receiver) handleTransfer(tc *tls.Conn, peerAddr, peerFP string) {
 		totalBytes += m.Size
 	}
 	obs.SessionStart(Receiving, peerLabel, len(metas), totalBytes)
-	pr := newPathResolver(r.Dir)
+	sink := r.sinkFor(peerAddr)
 	for i, m := range metas {
 		// No deadline on the bulk body transfer: a big file on slow WiFi can take
 		// minutes, and a fixed deadline would wrongly kill it. Long-stall safety
 		// comes from the user's Cancel (closeOnCancel) and TCP itself; the small
 		// framed reads/writes (meta, checksum, ack) keep their per-op deadlines.
-		if err := r.receiveBody(tc, m, i+1, len(metas), obs, pr); err != nil {
+		if err := r.receiveBody(tc, m, i+1, len(metas), obs, sink); err != nil {
 			obs.SessionEnd(Receiving, peerLabel, err)
 			return
 		}
@@ -319,28 +389,20 @@ func readMetaFrame(conn net.Conn) (fileMeta, error) {
 	return m, nil
 }
 
-func (r *Receiver) receiveBody(conn net.Conn, meta fileMeta, idx, total int, obs Observer, pr *pathResolver) error {
-	outPath, label, err := pr.resolve(meta)
+func (r *Receiver) receiveBody(conn net.Conn, meta fileMeta, idx, total int, obs Observer, sink FileSink) error {
+	target, err := sink.Create(sanitizeName(meta.Name), safeRel(meta.Rel), meta.Size)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
-		return fmt.Errorf("create folder for %s: %w", label, err)
-	}
-	f, err := os.Create(outPath)
-	if err != nil {
-		return fmt.Errorf("create %s: %w", outPath, err)
-	}
-	defer f.Close()
+	label := target.Label()
 
 	obs.FileStart(Receiving, idx, total, label, meta.Size)
 	hasher := sha256.New()
 	pw := &progressWriter{obs: obs, dir: Receiving, index: idx, total: total, name: label, size: meta.Size}
-	dst := io.MultiWriter(f, hasher, pw)
+	dst := io.MultiWriter(target, hasher, pw)
 	if _, err := io.CopyN(dst, conn, meta.Size); err != nil {
 		// Cancelled or dropped mid-file: don't leave a half-written partial behind.
-		f.Close()
-		_ = os.Remove(outPath)
+		_ = target.Discard()
 		return fmt.Errorf("copy body: %w", err)
 	}
 
@@ -349,6 +411,7 @@ func (r *Receiver) receiveBody(conn net.Conn, meta fileMeta, idx, total int, obs
 	_ = conn.SetReadDeadline(time.Now().Add(idleTimeout))
 	want := make([]byte, sha256.Size)
 	if _, err := io.ReadFull(conn, want); err != nil {
+		_ = target.Discard()
 		return fmt.Errorf("read checksum: %w", err)
 	}
 	_ = conn.SetReadDeadline(time.Time{})
@@ -364,12 +427,19 @@ func (r *Receiver) receiveBody(conn net.Conn, meta fileMeta, idx, total int, obs
 	_ = conn.SetWriteDeadline(time.Time{})
 
 	if !ok {
-		_ = os.Remove(outPath)
+		_ = target.Discard()
 		err := errors.New("checksum mismatch, file discarded")
 		obs.FileDone(FileResult{Dir: Receiving, Index: idx, Total: total, Name: label, Size: meta.Size, Err: err})
 		return err
 	}
-	obs.FileDone(FileResult{Dir: Receiving, Index: idx, Total: total, Name: label, Size: meta.Size, SavedTo: outPath, Verified: true})
+	savedTo, err := target.Commit()
+	if err != nil {
+		_ = target.Discard()
+		err = fmt.Errorf("finish %s: %w", label, err)
+		obs.FileDone(FileResult{Dir: Receiving, Index: idx, Total: total, Name: label, Size: meta.Size, Err: err})
+		return err
+	}
+	obs.FileDone(FileResult{Dir: Receiving, Index: idx, Total: total, Name: label, Size: meta.Size, SavedTo: savedTo, Verified: true})
 	return nil
 }
 

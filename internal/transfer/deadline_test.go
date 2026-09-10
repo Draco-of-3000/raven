@@ -35,7 +35,7 @@ func TestAckSurvivesStaleDeadline(t *testing.T) {
 	}
 
 	meta := fileMeta{Name: "batchfile.bin", Size: int64(len(body))}
-	if err := r.receiveBody(c, meta, 3, 12, NopObserver{}, pr); err != nil {
+	if err := r.receiveBody(c, meta, 3, 12, NopObserver{}, &dirSink{pr: pr}); err != nil {
 		t.Fatalf("receiveBody failed with a stale deadline present (the bug): %v", err)
 	}
 	if len(c.written) != 1 || c.written[0] != 0x01 {
