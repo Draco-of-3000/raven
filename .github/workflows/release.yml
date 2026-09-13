@@ -2,7 +2,8 @@ name: release
 
 # Builds the downloadable Raven artifacts for every platform we ship. Wails links
 # against each platform's native webview, so a .dmg can only be produced on
-# macOS. Runs on a new tag, or on demand against a tag that already exists.
+# macOS. Runs on a new tag, or on demand against a tag that already exists. An
+# on-demand run with upload off builds everything and leaves every release alone.
 #
 # The build checks out the tag, so the packaging script it runs is the one in
 # that tag: fix CI before tagging, not after.
@@ -15,6 +16,10 @@ on:
       tag:
         description: "Existing tag to build, e.g. v0.2.0"
         required: true
+      upload:
+        description: "Attach the builds to the release. Turn off to test the workflow without touching a release."
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -40,6 +45,7 @@ jobs:
         run: echo "name=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
 
       - name: Create it if it is not there yet
+        if: github.event_name != 'workflow_dispatch' || inputs.upload
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.tag.outputs.name }}
@@ -71,15 +77,15 @@ jobs:
             outflag: "-o Raven-windows-x64.exe"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -127,6 +133,7 @@ jobs:
           ls -la "dist/${{ matrix.asset }}"
 
       - name: Attach it to the release
+        if: github.event_name != 'workflow_dispatch' || inputs.upload
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
