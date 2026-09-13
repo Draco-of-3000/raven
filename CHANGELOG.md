@@ -3,6 +3,13 @@
 Notable changes to Raven. Newest first. Dates are when the change shipped as a
 downloadable build.
 
+## Unreleased
+
+The desktop app is now built on Wails 2.15. On Windows, a computer without the WebView2 runtime
+whose download of it fails now shows the installation error instead of the app quitting
+silently. Release builds also move to a Go release that still receives security fixes, with
+newer versions of the encryption and networking libraries Raven depends on.
+
 ## 2026-09-13
 
 Fixed a bug where declining a transfer left the sending device waiting. The refusal always

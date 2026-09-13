@@ -25,11 +25,11 @@ permissions:
   contents: write
 
 env:
-  # The versions the project is built against. The Wails CLI is pinned alongside
-  # the runtime in go.mod so the two cannot drift.
-  GO_VERSION: "1.23"
+  # Release builds use the newest supported Go release; go.mod only states the
+  # minimum. The Wails CLI is installed at the version go.mod requires, so the
+  # CLI and the runtime it builds against cannot drift apart.
+  GO_VERSION: "1.27"
   NODE_VERSION: "22"
-  WAILS_VERSION: "v2.12.0"
 
 jobs:
   # One place decides the release exists. Doing this inside the build matrix
@@ -91,7 +91,7 @@ jobs:
 
       - name: Install the Wails CLI
         shell: bash
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
+        run: go install "github.com/wailsapp/wails/v2/cmd/wails@$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v2)"
 
       - name: Build
         shell: bash
