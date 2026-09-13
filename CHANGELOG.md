@@ -3,7 +3,13 @@
 Notable changes to Raven. Newest first. Dates are when the change shipped as a
 downloadable build.
 
-## Unreleased
+## 2026-09-13
+
+Fixed a bug where declining a transfer left the sending device waiting. The refusal always
+reached the sender, but a decline arrives before the transfer itself begins, so nothing reported
+the end of a session that never started, and the sending window sat on "waiting for them to
+accept" until it was closed. A send now reports its end either way, and a transfer you cancelled
+yourself is no longer shown as a failure.
 
 Fixed a bug where accepting a transfer more than a minute after it was offered made it fail
 once the files started to arrive. The receiver set a timeout while reading the list of incoming
