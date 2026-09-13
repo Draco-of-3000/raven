@@ -1,0 +1,105 @@
+name: release
+
+# Builds the downloadable Raven artifacts for every platform we ship. Wails links
+# against each platform's native webview, so macOS builds can only be produced on
+# macOS. Runs on a new tag, or on demand against a tag that already exists.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build, e.g. v0.2.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  # The versions the project is built against. The Wails CLI is pinned alongside
+  # the runtime in go.mod so the two cannot drift.
+  GO_VERSION: "1.23"
+  NODE_VERSION: "22"
+  WAILS_VERSION: "v2.12.0"
+
+jobs:
+  build:
+    name: ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            platform: darwin/universal
+            asset: Raven-macOS-universal.dmg
+            # No -o: make-dmg.sh reads the .app from its default path.
+            outflag: ""
+          - os: windows-latest
+            platform: windows/amd64
+            asset: Raven-windows-x64.exe
+            outflag: "-o Raven-windows-x64.exe"
+
+    steps:
+      - name: Resolve the tag
+        id: tag
+        shell: bash
+        run: echo "name=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.name }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install the Wails CLI
+        shell: bash
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
+
+      - name: Build
+        shell: bash
+        # No -s: let Wails run its own frontend install and build hooks so the
+        # embedded assets come from this tag rather than a local dist directory.
+        env:
+          NODE_OPTIONS: "--max-old-space-size=4096"
+        run: wails build -platform ${{ matrix.platform }} ${{ matrix.outflag }} -trimpath
+
+      - name: Package the .dmg
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          RAVEN_DMG_OUT: ${{ github.workspace }}/dist/${{ matrix.asset }}
+          # The Finder race is likeliest on a runner, and an unstyled .dmg fails
+          # the job rather than shipping, so give it more room to settle.
+          RAVEN_DMG_ATTEMPTS: "5"
+        run: |
+          brew install create-dmg
+          bash build/dmg/make-dmg.sh
+
+      - name: Collect the .exe
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          mv "build/bin/${{ matrix.asset }}" "dist/${{ matrix.asset }}"
+
+      - name: Attach it to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.name }}
+        # Create the release as a draft if it is not there yet. Publishing stays a
+        # deliberate step, so a tag push never ships anything on its own.
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+                 --title "Raven $TAG" --draft --generate-notes
+          gh release upload "$TAG" "dist/${{ matrix.asset }}" \
+            --repo "$GITHUB_REPOSITORY" --clobber
